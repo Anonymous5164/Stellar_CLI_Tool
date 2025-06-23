@@ -1,0 +1,23 @@
+{
+  "name": "stellar_unsigned_txn",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "npm run build && node dist/build-transaction.js",
+    "dev": "ts-node src/build-transaction.ts",
+    "clean": "rmdir /s dist"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "stellar-sdk": "^13.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.3",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.3"
+  }
+}
