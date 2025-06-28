@@ -8,13 +8,27 @@ const TESTNET_CONFIG = {
   friendbot: 'https://friendbot.stellar.org'
 };
 
+const MAINNET_CONFIG = {
+  horizon: 'https://horizon.stellar.org',
+  passphrase: 'Public Global Stellar Network ; September 2015'
+};
+
 const SOURCE_PUBLIC_KEY = 'GDBKSMQZAJ3DBIM55BAWY7I4QSRUHZ3IOJV2YJAVQHWUXMGIDVS5MGNM';
+
+const MIN_ACCOUNT_BALANCE = '1.0000000';
 
 const TESTNET_NETWORK_HASH = Buffer.from([
   0xce, 0xe0, 0x30, 0x2d, 0x7f, 0xc5, 0x27, 0x3c,
   0x88, 0x6d, 0xb1, 0x49, 0xa5, 0x3b, 0x0f, 0x44,
   0x02, 0xec, 0x4c, 0x25, 0xb6, 0x1a, 0x0c, 0x8b,
   0x24, 0x8e, 0x63, 0x72, 0x4f, 0x2f, 0x66, 0xfb
+]);
+
+const MAINNET_NETWORK_HASH = Buffer.from([
+  0x7a, 0xc3, 0x39, 0x97, 0x54, 0x4e, 0x31, 0x75,
+  0xd2, 0x66, 0xbd, 0x02, 0x24, 0x39, 0xb2, 0x2c,
+  0xdb, 0x16, 0x50, 0x8c, 0x01, 0x16, 0x3f, 0x26,
+  0xe5, 0xcb, 0x2a, 0x3e, 0x10, 0x45, 0xa9, 0x79
 ]);
 
 interface TransactionData {
@@ -71,9 +85,21 @@ async function checkAccountActivation(server: Horizon.Server): Promise<void> {
     await server.loadAccount(SOURCE_PUBLIC_KEY);
   } catch (error: any) {
     if (error.response?.status === 404) {
-      throw new Error(`Source account ${SOURCE_PUBLIC_KEY} not found on testnet. Fund it first!`);
+      throw new Error(`Source account ${SOURCE_PUBLIC_KEY} not found on network. Fund it first!`);
     }
     throw new Error(`Failed to check account: ${error.message}`);
+  }
+}
+
+async function checkDestinationAccountExists(server: Horizon.Server, destination: string): Promise<boolean> {
+  try {
+    await server.loadAccount(destination);
+    return true;
+  } catch (error: any) {
+    if (error.response?.status === 404) {
+      return false;
+    }
+    return true;
   }
 }
 
@@ -125,8 +151,8 @@ async function getMemoInput(): Promise<any> {
   }
 }
 
-async function buildStellarTransaction(): Promise<TransactionData> {
-  const server = new Horizon.Server(TESTNET_CONFIG.horizon);
+async function buildStellarTransaction(config: any, networkHash: Buffer): Promise<TransactionData> {
+  const server = new Horizon.Server(config.horizon);
   
   try {
     await checkAccountActivation(server);
@@ -140,27 +166,48 @@ async function buildStellarTransaction(): Promise<TransactionData> {
       }
     } while (!isValidStellarAddress(destination));
     
+    const destinationExists = await checkDestinationAccountExists(server, destination);
+    let operationType: 'payment' | 'createAccount' = 'payment';
+
+    if (!destinationExists) {
+      console.log('Destination address not activated switching operation to Create Account');
+      operationType = 'createAccount';
+    }
+    
     let amount: string;
     do {
       amount = await askQuestion('Amount (XLM): ');
       const amountNum = parseFloat(amount);
       if (isNaN(amountNum) || amountNum <= 0) {
         console.log('Invalid amount');
+      } else if (operationType === 'createAccount' && amountNum < parseFloat(MIN_ACCOUNT_BALANCE)) {
+        console.log(`Create Account requires minimum ${MIN_ACCOUNT_BALANCE} XLM`);
+      } else {
+        break;
       }
-    } while (isNaN(parseFloat(amount)) || parseFloat(amount) <= 0);
+    } while (true);
     
     const memo = await getMemoInput();
     
     let txBuilder = new TransactionBuilder(sourceAccount, {
       fee: "100",
-      networkPassphrase: TESTNET_CONFIG.passphrase
-    })
-    .addOperation(Operation.payment({
-      destination: destination,
-      asset: Asset.native(),
-      amount: formatAmount(amount)
-    }))
-    .setTimeout(30);
+      networkPassphrase: config.passphrase
+    });
+    
+    if (operationType === 'createAccount') {
+      txBuilder = txBuilder.addOperation(Operation.createAccount({
+        destination: destination,
+        startingBalance: formatAmount(amount)
+      }));
+    } else {
+      txBuilder = txBuilder.addOperation(Operation.payment({
+        destination: destination,
+        asset: Asset.native(),
+        amount: formatAmount(amount)
+      }));
+    }
+    
+    txBuilder = txBuilder.setTimeout(0);
     
     if (memo) {
       txBuilder = txBuilder.addMemo(memo);
@@ -171,7 +218,7 @@ async function buildStellarTransaction(): Promise<TransactionData> {
     
     const transactionData: TransactionData = {
       xdr: xdr,
-      networkHash: TESTNET_NETWORK_HASH,
+      networkHash: networkHash,
       transaction: transaction,
       details: {
         source: SOURCE_PUBLIC_KEY,
@@ -194,13 +241,13 @@ function displayTransaction(txData: TransactionData): void {
   console.log(txData.xdr);
 }
 
-async function broadcastTransaction(): Promise<void> {
-  const server = new Horizon.Server(TESTNET_CONFIG.horizon);
+async function broadcastTransaction(config: any): Promise<void> {
+  const server = new Horizon.Server(config.horizon);
   
   const signedXdr = await askQuestion('Enter signed XDR: ');
   
   try {
-    const transaction = TransactionBuilder.fromXDR(signedXdr, TESTNET_CONFIG.passphrase);
+    const transaction = TransactionBuilder.fromXDR(signedXdr, config.passphrase);
     const result = await server.submitTransaction(transaction);
     console.log('Transaction successful!');
     console.log('Hash:', result.hash);
@@ -217,6 +264,28 @@ async function broadcastTransaction(): Promise<void> {
 
 async function main(): Promise<void> {
   try {
+    console.log('Select network:');
+    console.log('1. Testnet');
+    console.log('2. Mainnet');
+    
+    let networkChoice: string;
+    do {
+      networkChoice = await askQuestion('Choose network (1-2): ');
+    } while (!['1', '2'].includes(networkChoice));
+    
+    const isMainnet = networkChoice === '2';
+    const config = isMainnet ? MAINNET_CONFIG : TESTNET_CONFIG;
+    const networkHash = isMainnet ? MAINNET_NETWORK_HASH : TESTNET_NETWORK_HASH;
+    
+    if (isMainnet) {
+      console.log('WARNING: You are using MAINNET - real XLM will be transferred!');
+      const confirm = await askQuestion('Continue? (yes/no): ');
+      if (confirm.toLowerCase() !== 'yes') {
+        console.log('Operation cancelled.');
+        return;
+      }
+    }
+    
     console.log('Select operation:');
     console.log('1. Create unsigned transaction');
     console.log('2. Broadcast signed transaction');
@@ -227,10 +296,10 @@ async function main(): Promise<void> {
     } while (!['1', '2'].includes(choice));
     
     if (choice === '1') {
-      const txData = await buildStellarTransaction();
+      const txData = await buildStellarTransaction(config, networkHash);
       displayTransaction(txData);
     } else {
-      await broadcastTransaction();
+      await broadcastTransaction(config);
     }
     
   } catch (error: any) {
